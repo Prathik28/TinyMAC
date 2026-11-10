@@ -90,4 +90,18 @@ module tinymac_regs (
     endcase
   end
 
+`ifdef FORMAL
+  // ---------------- formal properties ----------------
+  reg f_past_valid = 1'b0;
+  always @(posedge clk) f_past_valid <= 1'b1;
+
+  always @(posedge clk) begin
+    if (f_past_valid && $past(rst_n) && rst_n) begin
+      // SPI writes to A, B and CTRL have no effect while busy
+      if ($past(busy) && !$past(bist_we)) assert (ab == $past(ab));
+      if ($past(busy)) assert (ctrl_pulse == 4'd0);
+    end
+  end
+`endif
+
 endmodule

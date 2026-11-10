@@ -22,6 +22,7 @@ module tinymac_core (
     input  wire         clear_acc,  // clear C at the start of this run
     input  wire         quiet,      // BIST-internal run: do not touch the user DONE flag
     input  wire         clr_flags,  // CTRL.CLR_FLAGS pulse
+    input  wire         clr_done,   // BIST starting: drop DONE so BUSY and DONE are never both high
     output wire [79:0]  c_flat,     // 4 x 20-bit, index 2i+j
     output wire         busy,       // RUN in progress
     output wire         run_done,   // high for the one cycle after a run completes (C final)
@@ -49,7 +50,7 @@ module tinymac_core (
       done      <= 1'b0;
       quiet_run <= 1'b0;
     end else begin
-      if (clr_flags) done <= 1'b0;
+      if (clr_flags || clr_done) done <= 1'b0;
       case (state)
         S_RUN: begin
           t <= t + 3'd1;
@@ -128,5 +129,47 @@ module tinymac_core (
   end
 
   wire _unused = &{a01_unused, a11_unused, b10_unused, b11_unused, 1'b0};
+
+`ifdef FORMAL
+  // ---------------- formal properties ----------------
+  reg f_past_valid = 1'b0;
+  always @(posedge clk) f_past_valid <= 1'b1;
+
+  // cycles since an accepted user START, to prove a bounded response
+  reg       f_wait = 1'b0;
+  reg [3:0] f_cnt  = 4'd0;
+  always @(posedge clk) begin
+    if (!rst_n) begin
+      f_wait <= 1'b0;
+      f_cnt  <= 4'd0;
+    end else if (go && !quiet) begin
+      f_wait <= 1'b1;
+      f_cnt  <= 4'd0;
+    end else if (f_wait) begin
+      f_cnt <= f_cnt + 4'd1;
+      if (state == S_DONE) f_wait <= 1'b0;
+    end
+  end
+
+  always @(*) begin
+    if (f_past_valid && rst_n) begin
+      assert (state != 2'd3);                    // only IDLE / RUN / DONE are reachable
+      assert (t <= T_LAST);
+      if (state != S_RUN) assert (t == 3'd0);
+      // DONE follows an accepted START within 8 cycles (7 RUN cycles + 1)
+      if (f_wait) begin
+        assert (state != S_IDLE);
+        assert (!quiet_run);
+        assert (f_cnt <= 4'd7);
+        if (state == S_RUN)  assert (f_cnt == {1'b0, t});
+        if (state == S_DONE) assert (done && f_cnt == 4'd7);
+      end
+    end
+  end
+
+  always @(posedge clk) begin
+    if (f_past_valid && rst_n) cover (state == S_DONE && !quiet_run);
+  end
+`endif
 
 endmodule

@@ -83,7 +83,7 @@ module tt_um_prathik28_tinymac (
       .start(user_go | bist_run_start),
       .clear_acc(bist_run_start | ctrl_pulse[1]),
       .quiet(bist_run_start),
-      .clr_flags(ctrl_pulse[3]),
+      .clr_flags(ctrl_pulse[3]), .clr_done(bist_go),
       .c_flat(c_flat), .busy(core_busy), .run_done(run_done), .done(done), .ovf(ovf),
       .state(core_state), .t(t)
   );
@@ -129,5 +129,28 @@ module tt_um_prathik28_tinymac (
   assign uio_oe  = {8{dbg_en}};
 
   wire _unused = &{ena, uio_in, ui_in[7], t[2], lfsr[15:8], 1'b0};
+
+`ifdef FORMAL
+  // ---------------- formal properties (top level, on the real pins) ----------------
+  reg f_past_valid = 1'b0;
+  always @(posedge clk) f_past_valid <= 1'b1;
+  always @(*) if (!f_past_valid) assume (!rst_n);
+
+  always @(*) begin
+    if (f_past_valid && rst_n) begin
+      assert (!(uo_out[1] && uo_out[2]));        // BUSY and DONE never both high
+      assert (uo_out[7] == 1'b0);                // reserved output driven low
+      assert (uio_oe == 8'h00 || uio_oe == 8'hFF);
+      if (uio_oe == 8'h00) assert (uio_out == 8'h00);
+    end
+  end
+
+  // uio_oe is 0x00 whenever DBG_EN has been low (2-FF synchroniser latency = 2 cycles)
+  reg f_past2 = 1'b0;
+  always @(posedge clk) f_past2 <= f_past_valid;
+  always @(posedge clk) begin
+    if (f_past2 && !$past(ui_in[4], 2)) assert (uio_oe == 8'h00);
+  end
+`endif
 
 endmodule

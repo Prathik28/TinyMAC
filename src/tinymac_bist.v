@@ -134,4 +134,20 @@ module tinymac_bist (
     end
   end
 
+`ifdef FORMAL
+  // ---------------- formal properties ----------------
+  reg f_past_valid = 1'b0;
+  always @(posedge clk) f_past_valid <= 1'b1;
+
+  always @(*) begin
+    if (f_past_valid && rst_n) begin
+      assert (bstate <= B_FINISH);               // legal BIST FSM state
+      assert (active == (bstate != B_IDLE));
+      if (bstate == B_FOLD) assert (cnt <= 3'd3);
+      if (bstate != B_FILL && bstate != B_FOLD) assert (cnt == 3'd0);
+      if (bist_pass) assert (bist_done);
+    end
+  end
+`endif
+
 endmodule

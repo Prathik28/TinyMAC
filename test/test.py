@@ -388,3 +388,22 @@ async def test_busy_ignore(dut):
     assert (await spi.read(0x32, 2)) == [sig & 0xFF, sig >> 8], "busy writes corrupted BIST"
     assert await spi.read(0x10, 16) == ab_last
     assert await spi.read(0x03, 1) == [0x99]
+
+
+@cocotb.test()
+async def test_done_cleared_by_bist(dut):
+    """Regression for the formal counterexample: run -> DONE high -> BIST must drop DONE."""
+    spi = await setup(dut, half=6)
+    await run_matmul(dut, spi, np.ones((2, 4), int), np.ones((4, 2), int))
+    assert int(dut.uo_out.value) & DONE
+    spi.extra = 0x08  # BIST_GO pin
+    spi.pins(0, False, 0)
+    for _ in range(1500):
+        await ClockCycles(dut.clk, 1)
+        pins = int(dut.uo_out.value)
+        assert not (pins & BUSY and pins & DONE), "BUSY and DONE high together"
+        if pins & BIST_DONE:
+            break
+    spi.extra = 0
+    spi.pins(0, False, 0)
+    assert int(dut.uo_out.value) & BIST_PASS and not int(dut.uo_out.value) & DONE

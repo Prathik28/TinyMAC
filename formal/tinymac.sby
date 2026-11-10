@@ -1,0 +1,29 @@
+# SymbiYosys proofs for TinyMAC. Run from this folder:  sby -f tinymac.sby
+[tasks]
+bmc
+prove
+
+[options]
+bmc: mode bmc
+bmc: depth 30
+prove: mode prove
+multiclock off
+
+[engines]
+bmc: smtbmc bitwuzla
+prove: abc pdr
+
+[script]
+read -formal project.v spi_slave.v tinymac_regs.v tinymac_core.v tinymac_pe.v tinymac_bist.v
+prep -top tt_um_prathik28_tinymac
+prove: flatten
+prove: techmap t:$shiftx t:$shift
+setundef -anyseq
+
+[files]
+../src/project.v
+../src/spi_slave.v
+../src/tinymac_regs.v
+../src/tinymac_core.v
+../src/tinymac_pe.v
+../src/tinymac_bist.v

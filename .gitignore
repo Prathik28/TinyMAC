@@ -11,3 +11,5 @@ test/sim_build
 test/__pycache__/
 test/results.xml
 test/gate_level_netlist.v
+formal/tinymac_bmc
+formal/tinymac_prove

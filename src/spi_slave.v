@@ -115,4 +115,21 @@ module spi_slave (
     end
   end
 
+`ifdef FORMAL
+  // ---------------- formal properties ----------------
+  reg f_past_valid = 1'b0;
+  always @(posedge clk) f_past_valid <= 1'b1;
+
+  always @(posedge clk) begin
+    if (f_past_valid && $past(rst_n) && rst_n) begin
+      // MISO only changes on a (synchronised) SCK falling edge, or when CS_N is high
+      if (miso_o != $past(miso_o)) assert ($past(sck_fall) || $past(cs_idle));
+      // and it is held low while not selected
+      if ($past(cs_idle)) assert (!miso_o);
+      // writes are only issued for complete bytes while selected
+      if (wr_en) assert (!$past(cs_idle) && $past(sck_rise) && $past(bitcnt) == 3'd7);
+    end
+  end
+`endif
+
 endmodule
