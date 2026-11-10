@@ -10,7 +10,7 @@ import cocotb
 from cocotb.clock import Clock
 from cocotb.triggers import ClockCycles
 
-from model import ab_bytes, c_from_bytes, matmul
+from model import LFSR_SEED, ab_bytes, bist, c_from_bytes, lfsr_step, matmul
 
 SCK, CS_N, MOSI = 0x01, 0x02, 0x04
 
@@ -161,7 +161,7 @@ async def test_debug_bus(dut):
 
 # ---------------------------------------------------------------- compute
 
-BUSY, DONE, OVF = 0x02, 0x04, 0x08  # uo_out bits
+BUSY, DONE, OVF, BIST_DONE, BIST_PASS = 0x02, 0x04, 0x08, 0x10, 0x20  # uo_out bits
 
 
 async def pin_monitor(dut, stats):
@@ -297,3 +297,94 @@ async def test_debug_compute(dut):
     spi.pins(0, False, 0)
     await ClockCycles(dut.clk, 6)
     assert int(dut.uio_out.value) == 0b00_00_0_1_0_0
+
+
+# ---------------------------------------------------------------- BIST
+
+async def wait_bist(dut, limit=3000):
+    for n in range(limit):
+        if int(dut.uo_out.value) & BIST_DONE:
+            return n
+        await ClockCycles(dut.clk, 1)
+    raise AssertionError("BIST_DONE never rose")
+
+
+def final_lfsr():
+    x = LFSR_SEED
+    for _ in range(64 * 8):
+        x = lfsr_step(x)
+    return x
+
+
+@cocotb.test()
+async def test_bist(dut):
+    spi = await setup(dut, half=6)
+    sig, ab_last, c_last = bist()
+    dut._log.info(f"model signature {sig:#06x}")
+
+    # --- start from CTRL.BIST_START ---
+    await spi.write(0x00, [0x04])
+    await wait_bist(dut)
+    pins = int(dut.uo_out.value)
+    assert pins & BIST_PASS, "BIST_PASS pin low"
+    assert not pins & (BUSY | DONE | OVF), f"pins {pins:#04x}: BIST must not set DONE/OVF"
+    assert (await spi.read(0x01, 1))[0] == 0x18  # BIST_DONE | BIST_PASS
+    raw = await spi.read(0x30, 4)
+    cycles, rtl_sig = raw[0] | raw[1] << 8, raw[2] | raw[3] << 8
+    dut._log.info(f"BIST took {cycles} cycles, signature {rtl_sig:#06x}")
+    assert rtl_sig == sig, f"RTL signature {rtl_sig:#06x} != model {sig:#06x}"
+    assert 1200 <= cycles <= 1500
+    # BIST leaves its last operands and results behind, exactly as the model predicts
+    assert await spi.read(0x10, 16) == ab_last
+    assert np.array_equal(c_from_bytes(await spi.read(0x20, 12)), c_last)
+
+    # debug bus DBG_SEL=10 shows LFSR[7:0]
+    spi.extra = 0x10 | (0b10 << 5)
+    spi.pins(0, False, 0)
+    await ClockCycles(dut.clk, 6)
+    assert int(dut.uio_out.value) == final_lfsr() & 0xFF
+    spi.extra = 0
+
+    # CLR_FLAGS clears BIST_DONE / BIST_PASS
+    await spi.write(0x00, [0x08])
+    assert (await spi.read(0x01, 1))[0] == 0x00
+    assert not int(dut.uo_out.value) & (BIST_DONE | BIST_PASS)
+
+    # --- start from the BIST_GO pin (synchronised + edge detected) ---
+    spi.extra = 0x08
+    spi.pins(0, False, 0)
+    await ClockCycles(dut.clk, 20)
+    assert int(dut.uo_out.value) & BUSY
+    await wait_bist(dut)
+    # holding the button does not retrigger
+    await ClockCycles(dut.clk, 50)
+    assert not int(dut.uo_out.value) & BUSY
+    spi.extra = 0
+    spi.pins(0, False, 0)
+    assert int(dut.uo_out.value) & BIST_PASS
+    assert (await spi.read(0x32, 2)) == [sig & 0xFF, sig >> 8]
+
+    # a normal run still works afterwards and sets DONE
+    a, b = np.arange(-4, 4).reshape(2, 4), np.arange(8).reshape(4, 2)
+    c, status, cyc, _ = await run_matmul(dut, spi, a, b)
+    assert np.array_equal(c, matmul(a, b)[0]) and status == 0x1A and cyc == 7
+
+
+@cocotb.test()
+async def test_busy_ignore(dut):
+    spi = await setup(dut, half=4)  # writes are safe at clk/8
+    sig, ab_last, _ = bist()
+    await spi.write(0x00, [0x04])  # start BIST (~1400 cycles of BUSY)
+    assert int(dut.uo_out.value) & BUSY
+    await spi.write(0x10, [0x55, 0x55, 0x55, 0x55])  # A: ignored
+    await spi.write(0x00, [0x01])  # START: ignored
+    await spi.write(0x00, [0x08])  # CLR_FLAGS: ignored
+    await spi.write(0x03, [0x99])  # SCRATCH: allowed while busy
+    assert int(dut.uo_out.value) & BUSY, "BIST finished before the busy writes completed"
+    await wait_bist(dut)
+    spi.half = 6
+    status = (await spi.read(0x01, 1))[0]
+    assert status == 0x18, f"STATUS {status:#04x}: START/CLR_FLAGS must be ignored while busy"
+    assert (await spi.read(0x32, 2)) == [sig & 0xFF, sig >> 8], "busy writes corrupted BIST"
+    assert await spi.read(0x10, 16) == ab_last
+    assert await spi.read(0x03, 1) == [0x99]

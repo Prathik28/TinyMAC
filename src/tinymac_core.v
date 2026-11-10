@@ -18,25 +18,28 @@ module tinymac_core (
     input  wire         clk,
     input  wire         rst_n,
     input  wire [127:0] ab_flat,    // bytes 0..7 A[i][k] (4i+k), 8..15 B[k][j] (8+2k+j)
-    input  wire         start,      // CTRL.START pulse (ignored while busy)
-    input  wire         clear_acc,  // CTRL.CLEAR_ACC (with START)
+    input  wire         start,      // run request (caller guarantees !busy_top for user starts)
+    input  wire         clear_acc,  // clear C at the start of this run
+    input  wire         quiet,      // BIST-internal run: do not touch the user DONE flag
     input  wire         clr_flags,  // CTRL.CLR_FLAGS pulse
     output wire [79:0]  c_flat,     // 4 x 20-bit, index 2i+j
-    output wire         busy,
+    output wire         busy,       // RUN in progress
+    output wire         run_done,   // high for the one cycle after a run completes (C final)
     output reg          done,
     output reg          ovf,
-    output reg  [15:0]  cycle_cnt,
     output reg  [1:0]   state,
     output reg  [2:0]   t
 );
 
-  localparam [1:0] S_IDLE = 2'd0, S_RUN = 2'd1, S_DONE = 2'd2, S_BIST = 2'd3;
+  localparam [1:0] S_IDLE = 2'd0, S_RUN = 2'd1, S_DONE = 2'd2;
   localparam [2:0] T_LAST = 3'd6;
 
-  assign busy = (state == S_RUN) || (state == S_BIST);
+  assign busy     = (state == S_RUN);
+  assign run_done = (state == S_DONE);
 
   wire run = (state == S_RUN);
   wire go  = start && !busy;
+  reg  quiet_run;
 
   // ---------------- controller ----------------
   always @(posedge clk) begin
@@ -44,29 +47,27 @@ module tinymac_core (
       state     <= S_IDLE;
       t         <= 3'd0;
       done      <= 1'b0;
-      cycle_cnt <= 16'd0;
+      quiet_run <= 1'b0;
     end else begin
       if (clr_flags) done <= 1'b0;
       case (state)
-        S_IDLE, S_DONE: begin
+        S_RUN: begin
+          t <= t + 3'd1;
+          if (t == T_LAST) begin
+            state <= S_DONE;
+            t     <= 3'd0;
+            if (!quiet_run) done <= 1'b1;
+          end
+        end
+        default: begin  // S_IDLE, S_DONE (one cycle), unused code
           state <= S_IDLE;
           if (go) begin
             state     <= S_RUN;
             t         <= 3'd0;
-            done      <= 1'b0;
-            cycle_cnt <= 16'd0;
+            quiet_run <= quiet;
+            if (!quiet) done <= 1'b0;
           end
         end
-        S_RUN: begin
-          cycle_cnt <= cycle_cnt + 16'd1;
-          t         <= t + 3'd1;
-          if (t == T_LAST) begin
-            state <= S_DONE;
-            done  <= 1'b1;
-            t     <= 3'd0;
-          end
-        end
-        default: state <= S_IDLE;  // S_BIST: reserved until BIST is added
       endcase
     end
   end

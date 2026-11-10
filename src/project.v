@@ -1,5 +1,5 @@
 /*
- * TinyMAC top level: SPI slave, register file, 2x2 systolic compute core (BIST to follow).
+ * TinyMAC top level: SPI slave, register file, 2x2 systolic compute core, BIST.
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -35,7 +35,7 @@ module tt_um_prathik28_tinymac (
   end
   wire       dbg_en  = dbg_en_q[1];
   wire [1:0] dbg_sel = dbg_sel_q[3:2];
-  wire       bist_go_edge = bist_go_q[1] & ~bist_go_d;  // used once BIST is added
+  wire       bist_go_edge = bist_go_q[1] & ~bist_go_d;  // BIST_GO button, rising edge
 
   // ---- SPI + registers ----
   wire        miso;
@@ -54,27 +54,57 @@ module tt_um_prathik28_tinymac (
   );
 
   wire [79:0] c_flat;
-  wire        busy, done, ovf;
-  wire [15:0] cycle_cnt;
-  wire [1:0]  state;
+  wire        core_busy, run_done, done, ovf;
+  wire [1:0]  core_state;
   wire [2:0]  t;
-  wire        bist_done = 1'b0, bist_pass = 1'b0;  // BIST pending
+  wire        bist_active, bist_run_start, bist_we, bist_done, bist_pass;
+  wire [2:0]  bist_pair;
+  wire [15:0] bist_wdata, lfsr, bist_sig;
+
+  wire busy = core_busy | bist_active;
+  reg  [15:0] cycle_cnt;
+
+  // CTRL pulses are already suppressed by the register file while busy
+  wire user_go = ctrl_pulse[0] && !busy;
+  wire bist_go = (ctrl_pulse[2] | bist_go_edge) && !busy && !ctrl_pulse[0];
 
   tinymac_regs u_regs (
       .clk(clk), .rst_n(rst_n), .busy(busy),
       .wr_en(wr_en), .wr_addr(wr_addr), .wr_data(wr_data),
+      .bist_we(bist_we), .bist_pair(bist_pair), .bist_wdata(bist_wdata),
       .rd_addr(rd_addr), .rd_data(rd_data),
       .status({bist_pass, bist_done, ovf, done, busy}), .c_flat(c_flat),
-      .cycle_cnt(cycle_cnt), .bist_sig(16'd0),
+      .cycle_cnt(cycle_cnt), .bist_sig(bist_sig),
       .ab_flat(ab_flat), .ctrl_pulse(ctrl_pulse)
   );
 
   tinymac_core u_core (
       .clk(clk), .rst_n(rst_n), .ab_flat(ab_flat),
-      .start(ctrl_pulse[0]), .clear_acc(ctrl_pulse[1]), .clr_flags(ctrl_pulse[3]),
-      .c_flat(c_flat), .busy(busy), .done(done), .ovf(ovf),
-      .cycle_cnt(cycle_cnt), .state(state), .t(t)
+      .start(user_go | bist_run_start),
+      .clear_acc(bist_run_start | ctrl_pulse[1]),
+      .quiet(bist_run_start),
+      .clr_flags(ctrl_pulse[3]),
+      .c_flat(c_flat), .busy(core_busy), .run_done(run_done), .done(done), .ovf(ovf),
+      .state(core_state), .t(t)
   );
+
+  tinymac_bist u_bist (
+      .clk(clk), .rst_n(rst_n), .go(bist_go), .clr_flags(ctrl_pulse[3]),
+      .run_done(run_done), .c_flat(c_flat),
+      .active(bist_active), .run_start(bist_run_start),
+      .ab_we(bist_we), .ab_pair(bist_pair), .ab_wdata(bist_wdata),
+      .lfsr(lfsr), .sig(bist_sig), .bist_done(bist_done), .bist_pass(bist_pass)
+  );
+
+  // FSM state for debug: 0 IDLE, 1 RUN, 2 DONE, 3 BIST
+  wire [1:0] state = bist_active ? 2'd3 : core_state;
+
+  // cycle counter: clock cycles of the last run or BIST
+  always @(posedge clk) begin
+    if (!rst_n)                  cycle_cnt <= 16'd0;
+    else if (user_go | bist_go)  cycle_cnt <= 16'd0;
+    else if (busy)               cycle_cnt <= cycle_cnt + 16'd1;
+  end
 
   // ---- heartbeat: clk / 2^22 blink ----
   reg [21:0] hb_cnt;
@@ -89,7 +119,7 @@ module tt_um_prathik28_tinymac (
     case (dbg_sel)
       2'b00:   dbg_byte = {state, t[1:0], busy, done, ovf, bist_pass};
       2'b01:   dbg_byte = c_flat[7:0];  // C[0][0][7:0]
-      2'b10:   dbg_byte = 8'h00;       // LFSR[7:0] - BIST pending
+      2'b10:   dbg_byte = lfsr[7:0];
       default: dbg_byte = last_rx;
     endcase
   end
@@ -98,6 +128,6 @@ module tt_um_prathik28_tinymac (
   assign uio_out = dbg_en ? dbg_byte : 8'h00;
   assign uio_oe  = {8{dbg_en}};
 
-  wire _unused = &{ena, uio_in, ui_in[7], ctrl_pulse[2], t[2], bist_go_edge, 1'b0};
+  wire _unused = &{ena, uio_in, ui_in[7], t[2], lfsr[15:8], 1'b0};
 
 endmodule

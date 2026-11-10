@@ -16,6 +16,10 @@ module tinymac_regs (
     input  wire         wr_en,
     input  wire [6:0]   wr_addr,
     input  wire [7:0]   wr_data,
+    // BIST write port: two bytes per cycle, has priority over SPI
+    input  wire         bist_we,
+    input  wire [2:0]   bist_pair,
+    input  wire [15:0]  bist_wdata,
     // read port (combinational)
     input  wire [6:0]   rd_addr,
     output reg  [7:0]   rd_data,
@@ -47,7 +51,8 @@ module tinymac_regs (
     end else begin
       ctrl_pulse <= wr_ctrl ? wr_data[3:0] : 4'd0;
       if (wr_en && wr_addr == 7'h03) scratch <= wr_data;
-      if (wr_ab) ab[{ab_idx, 3'b000} +: 8] <= wr_data;
+      if (bist_we)    ab[{bist_pair, 4'b0000} +: 16] <= bist_wdata;
+      else if (wr_ab) ab[{ab_idx, 3'b000} +: 8]     <= wr_data;
     end
   end
 
