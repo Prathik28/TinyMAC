@@ -1,7 +1,7 @@
 # Tiny Tapeout project information
 project:
   title:        "TinyMAC"      # Project title
-  author:       "Prathik28"      # Your name
+  author:       "Prathik Amte"      # Your name
   discord:      ""      # Your discord username, for communication and automatically assigning you a Tapeout role (optional)
   description:  "2x2 INT8 systolic matrix multiply accelerator with SPI interface and BIST"      # One line description of what your project does
   language:     "Verilog" # other examples include SystemVerilog, Amaranth, VHDL, etc
