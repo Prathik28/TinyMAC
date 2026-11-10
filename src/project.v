@@ -1,5 +1,5 @@
 /*
- * TinyMAC top level (phase 1: SPI slave + register file; compute core to follow).
+ * TinyMAC top level: SPI slave, register file, 2x2 systolic compute core (BIST to follow).
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -53,12 +53,27 @@ module tt_um_prathik28_tinymac (
       .last_rx(last_rx)
   );
 
+  wire [79:0] c_flat;
+  wire        busy, done, ovf;
+  wire [15:0] cycle_cnt;
+  wire [1:0]  state;
+  wire [2:0]  t;
+  wire        bist_done = 1'b0, bist_pass = 1'b0;  // BIST pending
+
   tinymac_regs u_regs (
-      .clk(clk), .rst_n(rst_n), .busy(1'b0),
+      .clk(clk), .rst_n(rst_n), .busy(busy),
       .wr_en(wr_en), .wr_addr(wr_addr), .wr_data(wr_data),
       .rd_addr(rd_addr), .rd_data(rd_data),
-      .status(5'd0), .c_flat(80'd0), .cycle_cnt(16'd0), .bist_sig(16'd0),
+      .status({bist_pass, bist_done, ovf, done, busy}), .c_flat(c_flat),
+      .cycle_cnt(cycle_cnt), .bist_sig(16'd0),
       .ab_flat(ab_flat), .ctrl_pulse(ctrl_pulse)
+  );
+
+  tinymac_core u_core (
+      .clk(clk), .rst_n(rst_n), .ab_flat(ab_flat),
+      .start(ctrl_pulse[0]), .clear_acc(ctrl_pulse[1]), .clr_flags(ctrl_pulse[3]),
+      .c_flat(c_flat), .busy(busy), .done(done), .ovf(ovf),
+      .cycle_cnt(cycle_cnt), .state(state), .t(t)
   );
 
   // ---- heartbeat: clk / 2^22 blink ----
@@ -72,17 +87,17 @@ module tt_um_prathik28_tinymac (
   reg [7:0] dbg_byte;
   always @(*) begin
     case (dbg_sel)
-      2'b00:   dbg_byte = 8'h00;       // {state, k, BUSY, DONE, OVF, BIST_PASS} - compute core pending
-      2'b01:   dbg_byte = 8'h00;       // C[0][0][7:0] - compute core pending
+      2'b00:   dbg_byte = {state, t[1:0], busy, done, ovf, bist_pass};
+      2'b01:   dbg_byte = c_flat[7:0];  // C[0][0][7:0]
       2'b10:   dbg_byte = 8'h00;       // LFSR[7:0] - BIST pending
       default: dbg_byte = last_rx;
     endcase
   end
 
-  assign uo_out  = {1'b0, hb_cnt[21], 1'b0, 1'b0, 1'b0, 1'b0, 1'b0, miso};
+  assign uo_out  = {1'b0, hb_cnt[21], bist_pass, bist_done, ovf, done, busy, miso};
   assign uio_out = dbg_en ? dbg_byte : 8'h00;
   assign uio_oe  = {8{dbg_en}};
 
-  wire _unused = &{ena, uio_in, ui_in[7], ab_flat, ctrl_pulse, bist_go_edge, 1'b0};
+  wire _unused = &{ena, uio_in, ui_in[7], ctrl_pulse[2], t[2], bist_go_edge, 1'b0};
 
 endmodule

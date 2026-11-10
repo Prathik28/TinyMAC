@@ -1,9 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
-# TinyMAC phase 1 tests: reset, SPI framing, registers.
+# TinyMAC tests: reset, SPI framing, registers, systolic compute.
+
+import os
+import random
+
+import numpy as np
 
 import cocotb
 from cocotb.clock import Clock
 from cocotb.triggers import ClockCycles
+
+from model import ab_bytes, c_from_bytes, matmul
 
 SCK, CS_N, MOSI = 0x01, 0x02, 0x04
 
@@ -150,3 +157,143 @@ async def test_debug_bus(dut):
     await ClockCycles(dut.clk, 6)
     assert int(dut.uio_oe.value) == 0x00
     assert int(dut.uio_out.value) == 0x00
+
+
+# ---------------------------------------------------------------- compute
+
+BUSY, DONE, OVF = 0x02, 0x04, 0x08  # uo_out bits
+
+
+async def pin_monitor(dut, stats):
+    """Runs alongside SPI traffic: counts BUSY cycles, checks BUSY/DONE exclusivity."""
+    while True:
+        await ClockCycles(dut.clk, 1)
+        pins = int(dut.uo_out.value)
+        if pins & BUSY and pins & DONE:
+            stats["both"] += 1
+        stats["busy"] += bool(pins & BUSY)
+
+
+async def run_matmul(dut, spi, a, b, clear=True):
+    """Load A/B, start, wait for DONE, read C. Returns (C, STATUS, CYCLE_CNT, busy cycles seen on pin)."""
+    await spi.write(0x10, ab_bytes(a, b))
+    stats = {"busy": 0, "both": 0}
+    mon = cocotb.start_soon(pin_monitor(dut, stats))
+    await spi.write(0x00, [0x03 if clear else 0x01])
+    for _ in range(200):
+        pins = int(dut.uo_out.value)
+        if pins & DONE and not pins & BUSY:
+            break
+        await ClockCycles(dut.clk, 1)
+    else:
+        raise AssertionError("DONE never rose")
+    mon.cancel()
+    assert stats["both"] == 0, "BUSY and DONE high together"
+    c = c_from_bytes(await spi.read(0x20, 12))
+    status = (await spi.read(0x01, 1))[0]
+    cyc = await spi.read(0x30, 2)
+    return c, status, cyc[0] | (cyc[1] << 8), stats["busy"]
+
+
+def rand_mat(rng, shape):
+    return rng.integers(-128, 128, size=shape)
+
+
+@cocotb.test()
+async def test_matmul_directed(dut):
+    spi = await setup(dut, half=6)
+    eye_a = np.array([[1, 0, 0, 0], [0, 1, 0, 0]])
+    rng = np.random.default_rng(1)
+    b_rand = rand_mat(rng, (4, 2))
+    cases = {
+        "identity": (eye_a, b_rand),
+        "zero": (np.zeros((2, 4), int), np.zeros((4, 2), int)),
+        "all -128": (np.full((2, 4), -128), np.full((4, 2), -128)),
+        "all +127": (np.full((2, 4), 127), np.full((4, 2), 127)),
+        "-128 x +127": (np.full((2, 4), -128), np.full((4, 2), 127)),
+        "mixed signs": (np.array([[1, -1, 127, -128], [-5, 6, -7, 8]]),
+                        np.array([[-1, 2], [3, -4], [-128, 127], [100, -100]])),
+        "distinct": (np.arange(1, 9).reshape(2, 4), np.arange(-4, 4).reshape(4, 2)),
+    }
+    for name, (a, b) in cases.items():
+        c, status, cyc, busy_cycles = await run_matmul(dut, spi, a, b)
+        exp, ovf = matmul(a, b)
+        assert np.array_equal(c, exp), f"{name}: got {c.tolist()} expected {exp.tolist()}"
+        assert status == 0x02, f"{name}: STATUS {status:#04x}"  # DONE only
+        assert cyc == 7 and busy_cycles == 7, f"{name}: cycles {cyc}/{busy_cycles}"
+        dut._log.info(f"{name}: C = {c.tolist()} ok")
+
+
+@cocotb.test()
+async def test_matmul_random(dut):
+    spi = await setup(dut, half=5)
+    n = int(os.environ.get("RANDOM_N", "1000"))
+    rng = np.random.default_rng(2026)
+    for it in range(n):
+        a, b = rand_mat(rng, (2, 4)), rand_mat(rng, (4, 2))
+        c, status, _, _ = await run_matmul(dut, spi, a, b)
+        exp, _ = matmul(a, b)
+        assert np.array_equal(c, exp), f"case {it}: A={a.tolist()} B={b.tolist()} got {c.tolist()}"
+        assert status == 0x02
+    dut._log.info(f"{n} random matrix pairs match NumPy")
+
+
+@cocotb.test()
+async def test_accumulate(dut):
+    spi = await setup(dut, half=6)
+    rng = np.random.default_rng(7)
+    for trial in range(5):
+        acc = None
+        for run in range(4):  # K = 16
+            a, b = rand_mat(rng, (2, 4)), rand_mat(rng, (4, 2))
+            if trial == 0:  # worst case magnitude
+                a, b = np.full((2, 4), -128), np.full((4, 2), -128)
+            c, status, _, _ = await run_matmul(dut, spi, a, b, clear=(run == 0))
+            acc, ovf = matmul(a, b, acc, clear=(run == 0))
+            assert not ovf
+            assert np.array_equal(c, acc), f"trial {trial} run {run}: got {c.tolist()} expected {acc.tolist()}"
+            assert status == 0x02, f"STATUS {status:#04x} (OVF must stay clear for K=16)"
+
+
+@cocotb.test()
+async def test_overflow(dut):
+    spi = await setup(dut, half=6)
+    a, b = np.full((2, 4), -128), np.full((4, 2), -128)  # +65536 per run
+    acc = None
+    for run in range(8):
+        c, status, _, _ = await run_matmul(dut, spi, a, b, clear=(run == 0))
+        acc, ovf = matmul(a, b, acc, clear=(run == 0))
+        assert np.array_equal(c, acc)
+        assert bool(status & 0x04) == ovf, f"run {run}: STATUS {status:#04x}, model ovf {ovf}"
+    assert ovf and c[0, 0] == -(1 << 19)  # 8 x 65536 = 2^19 wraps to -2^19
+    assert int(dut.uo_out.value) & OVF
+    # sticky: a fresh, non-overflowing run does not clear it
+    c, status, _, _ = await run_matmul(dut, spi, np.ones((2, 4), int), np.ones((4, 2), int))
+    assert np.array_equal(c, np.full((2, 2), 4)) and status & 0x04
+    # CLR_FLAGS clears OVF and DONE
+    await spi.write(0x00, [0x08])
+    assert (await spi.read(0x01, 1))[0] == 0x00
+    assert not int(dut.uo_out.value) & (OVF | DONE)
+    # overflow in the negative direction: -128 x 127 = -16256 per product
+    acc = None
+    for run in range(9):
+        c, status, _, _ = await run_matmul(dut, spi, a, np.full((4, 2), 127), clear=(run == 0))
+        acc, ovf = matmul(a, np.full((4, 2), 127), acc, clear=(run == 0))
+        assert np.array_equal(c, acc) and bool(status & 0x04) == ovf
+    assert ovf
+
+
+@cocotb.test()
+async def test_debug_compute(dut):
+    spi = await setup(dut, half=6)
+    a = np.array([[3, 0, 0, 0], [0, 0, 0, 0]])
+    b = np.array([[-7, 0], [0, 0], [0, 0], [0, 0]])
+    await run_matmul(dut, spi, a, b)
+    spi.extra = 0x10 | (0b01 << 5)  # DBG_SEL=01: C[0][0][7:0]
+    spi.pins(0, False, 0)
+    await ClockCycles(dut.clk, 6)
+    assert int(dut.uio_out.value) == (-21) & 0xFF
+    spi.extra = 0x10  # DBG_SEL=00: {state, k, BUSY, DONE, OVF, BIST_PASS}
+    spi.pins(0, False, 0)
+    await ClockCycles(dut.clk, 6)
+    assert int(dut.uio_out.value) == 0b00_00_0_1_0_0

@@ -1,0 +1,131 @@
+/*
+ * TinyMAC compute core: skewed feeders, 2x2 PE array and controller.
+ *
+ * Timing (t = step counter in RUN, starting at 0 on the START edge):
+ *   feeder row i registers A[i][t-i]; feeder column j registers B[t-j][j]
+ *   (zero outside 0..3). PE(i,j) sees operand pair k in cycle k+i+j+1 and
+ *   accumulates it at the following edge, so the last pair (k=3, i=j=1)
+ *   lands at the edge that ends t = 6. RUN therefore lasts 7 cycles.
+ *
+ * Feeders and PE pipelines carry zeros whenever not RUN, so stale data
+ * can never leak into a new run.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+`default_nettype none
+
+module tinymac_core (
+    input  wire         clk,
+    input  wire         rst_n,
+    input  wire [127:0] ab_flat,    // bytes 0..7 A[i][k] (4i+k), 8..15 B[k][j] (8+2k+j)
+    input  wire         start,      // CTRL.START pulse (ignored while busy)
+    input  wire         clear_acc,  // CTRL.CLEAR_ACC (with START)
+    input  wire         clr_flags,  // CTRL.CLR_FLAGS pulse
+    output wire [79:0]  c_flat,     // 4 x 20-bit, index 2i+j
+    output wire         busy,
+    output reg          done,
+    output reg          ovf,
+    output reg  [15:0]  cycle_cnt,
+    output reg  [1:0]   state,
+    output reg  [2:0]   t
+);
+
+  localparam [1:0] S_IDLE = 2'd0, S_RUN = 2'd1, S_DONE = 2'd2, S_BIST = 2'd3;
+  localparam [2:0] T_LAST = 3'd6;
+
+  assign busy = (state == S_RUN) || (state == S_BIST);
+
+  wire run = (state == S_RUN);
+  wire go  = start && !busy;
+
+  // ---------------- controller ----------------
+  always @(posedge clk) begin
+    if (!rst_n) begin
+      state     <= S_IDLE;
+      t         <= 3'd0;
+      done      <= 1'b0;
+      cycle_cnt <= 16'd0;
+    end else begin
+      if (clr_flags) done <= 1'b0;
+      case (state)
+        S_IDLE, S_DONE: begin
+          state <= S_IDLE;
+          if (go) begin
+            state     <= S_RUN;
+            t         <= 3'd0;
+            done      <= 1'b0;
+            cycle_cnt <= 16'd0;
+          end
+        end
+        S_RUN: begin
+          cycle_cnt <= cycle_cnt + 16'd1;
+          t         <= t + 3'd1;
+          if (t == T_LAST) begin
+            state <= S_DONE;
+            done  <= 1'b1;
+            t     <= 3'd0;
+          end
+        end
+        default: state <= S_IDLE;  // S_BIST: reserved until BIST is added
+      endcase
+    end
+  end
+
+  // ---------------- feeders ----------------
+  function [7:0] a_byte(input [127:0] ab, input integer i, input [2:0] tt);
+    reg [2:0] k;
+    begin
+      k = tt - i[2:0];
+      a_byte = (tt >= i[2:0] && k < 3'd4) ? ab[8*(4*i + {29'd0, k}) +: 8] : 8'h00;
+    end
+  endfunction
+
+  function [7:0] b_byte(input [127:0] ab, input integer j, input [2:0] tt);
+    reg [2:0] k;
+    begin
+      k = tt - j[2:0];
+      b_byte = (tt >= j[2:0] && k < 3'd4) ? ab[8*(8 + 2*{29'd0, k} + j) +: 8] : 8'h00;
+    end
+  endfunction
+
+  reg [7:0] a_feed0, a_feed1, b_feed0, b_feed1;
+  always @(posedge clk) begin
+    if (!rst_n) begin
+      a_feed0 <= 8'h00; a_feed1 <= 8'h00;
+      b_feed0 <= 8'h00; b_feed1 <= 8'h00;
+    end else begin
+      a_feed0 <= run ? a_byte(ab_flat, 0, t) : 8'h00;
+      a_feed1 <= run ? a_byte(ab_flat, 1, t) : 8'h00;
+      b_feed0 <= run ? b_byte(ab_flat, 0, t) : 8'h00;
+      b_feed1 <= run ? b_byte(ab_flat, 1, t) : 8'h00;
+    end
+  end
+
+  // ---------------- 2x2 array ----------------
+  wire        clear = go && clear_acc;
+  wire [7:0]  a00, a01_unused, a10, a11_unused;   // a passed right
+  wire [7:0]  b00, b01, b10_unused, b11_unused;   // b passed down
+  wire [19:0] acc00, acc01, acc10, acc11;
+  wire        o00, o01, o10, o11;
+
+  tinymac_pe pe00 (.clk(clk), .rst_n(rst_n), .clear(clear), .en(run),
+                   .a_in(a_feed0), .b_in(b_feed0), .a_out(a00), .b_out(b00), .acc(acc00), .ovf(o00));
+  tinymac_pe pe01 (.clk(clk), .rst_n(rst_n), .clear(clear), .en(run),
+                   .a_in(a00), .b_in(b_feed1), .a_out(a01_unused), .b_out(b01), .acc(acc01), .ovf(o01));
+  tinymac_pe pe10 (.clk(clk), .rst_n(rst_n), .clear(clear), .en(run),
+                   .a_in(a_feed1), .b_in(b00), .a_out(a10), .b_out(b10_unused), .acc(acc10), .ovf(o10));
+  tinymac_pe pe11 (.clk(clk), .rst_n(rst_n), .clear(clear), .en(run),
+                   .a_in(a10), .b_in(b01), .a_out(a11_unused), .b_out(b11_unused), .acc(acc11), .ovf(o11));
+
+  assign c_flat = {acc11, acc10, acc01, acc00};
+
+  // sticky overflow flag
+  always @(posedge clk) begin
+    if (!rst_n)                     ovf <= 1'b0;
+    else if (o00 | o01 | o10 | o11) ovf <= 1'b1;
+    else if (clr_flags)             ovf <= 1'b0;
+  end
+
+  wire _unused = &{a01_unused, a11_unused, b10_unused, b11_unused, 1'b0};
+
+endmodule
