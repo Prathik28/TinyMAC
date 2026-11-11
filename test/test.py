@@ -10,6 +10,7 @@ import cocotb
 from cocotb.clock import Clock
 from cocotb.triggers import ClockCycles
 
+import fcov
 from model import LFSR_SEED, ab_bytes, bist, c_from_bytes, lfsr_step, matmul
 
 SCK, CS_N, MOSI = 0x01, 0x02, 0x04
@@ -27,6 +28,8 @@ class Spi:
         self.dut.ui_in.value = self.extra | (SCK if sck else 0) | (0 if cs else CS_N) | (MOSI if mosi else 0)
 
     async def xfer(self, tx, abort_after_bits=None):
+        if abort_after_bits is not None:
+            fcov.hit("spi_abort")
         rx, nbits = [], 0
         self.pins(0, True, 0)
         await ClockCycles(self.dut.clk, 4)
@@ -52,9 +55,11 @@ class Spi:
         return rx
 
     async def write(self, addr, data):
+        fcov.on_write(addr & 0x7F, list(data), self.half)
         await self.xfer([addr & 0x7F] + list(data))
 
     async def read(self, addr, n):
+        fcov.on_read(addr, n, self.half)
         rx = await self.xfer([0x80 | addr, 0x00] + [0x00] * n)
         assert rx[1] == 0x00, "dummy byte must be 0x00"
         return rx[2:]
@@ -66,6 +71,7 @@ async def setup(dut, half=8):
     dut.uio_in.value = 0
     dut.rst_n.value = 0
     spi = Spi(dut, half)
+    cocotb.start_soon(fcov.monitor(dut))
     spi.pins(0, False, 0)
     await ClockCycles(dut.clk, 10)
     dut.rst_n.value = 1
@@ -391,6 +397,24 @@ async def test_busy_ignore(dut):
 
 
 @cocotb.test()
+async def test_bist_pin_ignored_while_busy(dut):
+    """A BIST_GO pin edge while BUSY must not restart or disturb the running BIST."""
+    spi = await setup(dut, half=6)
+    sig, _, _ = bist()
+    await spi.write(0x00, [0x04])  # BIST from register
+    await ClockCycles(dut.clk, 50)
+    assert int(dut.uo_out.value) & BUSY
+    spi.extra = 0x08  # rising edge on the BIST_GO pin while busy
+    spi.pins(0, False, 0)
+    await ClockCycles(dut.clk, 10)
+    spi.extra = 0
+    spi.pins(0, False, 0)
+    await wait_bist(dut)
+    assert (await spi.read(0x32, 2)) == [sig & 0xFF, sig >> 8], "pin edge disturbed the running BIST"
+    assert (await spi.read(0x01, 1))[0] == 0x18
+
+
+@cocotb.test()
 async def test_done_cleared_by_bist(dut):
     """Regression for the formal counterexample: run -> DONE high -> BIST must drop DONE."""
     spi = await setup(dut, half=6)
@@ -457,3 +481,13 @@ async def test_heartbeat(dut):
             dut._log.info(f"heartbeat high after ~{(chunk + 1) << 16} cycles")
             return
     raise AssertionError("HEARTBEAT never rose within 2^21 + margin cycles")
+
+
+@cocotb.test()
+async def test_zz_functional_coverage(dut):
+    """Runs last: report the functional coverage collected by all earlier tests."""
+    frac, text = fcov.summary()
+    dut._log.info("\n" + text)
+    with open("fcov_report.txt", "w") as f:
+        f.write(text + "\n")
+    assert frac >= 0.95, f"functional coverage {100 * frac:.1f} % is below 95 %"

@@ -17,3 +17,4 @@ formal/tinymac
 test/coverage.dat
 test/cov_annot/
 test/sim_build/
+test/fcov_report.txt

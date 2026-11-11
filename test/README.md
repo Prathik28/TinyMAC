@@ -46,6 +46,20 @@ Using Surfer
 surfer tb.fst
 ```
 
+## Functional coverage
+
+Code coverage (below) says which lines ran; functional coverage says which *behaviours*
+from the spec were exercised. `fcov.py` defines 53 named bins: every register write
+and read class, SPI burst/abort/fast/slow cases, core states, clear vs accumulate runs,
+per-PE overflow, operand extremes (-128x-128, 127x127, -128x127), writes while busy,
+BIST from register and pin, BIST pass and fail, BIST pin while busy, and all four debug
+selections plus the high-impedance case. SPI bins are hit by the `Spi` helper; core,
+BIST and debug bins by a per-clock monitor of internal signals (RTL simulation only,
+gate-level runs check the SPI bins).
+
+The last test, `test_zz_functional_coverage`, prints the table (also written to
+`fcov_report.txt`) and fails if coverage drops below 95 %. Current result: 53/53 = 100 %.
+
 ## Coverage
 
 `./coverage.sh` re-runs the whole suite under Verilator and prints line, branch,
