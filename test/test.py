@@ -407,3 +407,53 @@ async def test_done_cleared_by_bist(dut):
     spi.extra = 0
     spi.pins(0, False, 0)
     assert int(dut.uo_out.value) & BIST_PASS and not int(dut.uo_out.value) & DONE
+
+
+@cocotb.test(skip=os.environ.get("GATES") == "yes")  # needs RTL hierarchy
+async def test_bist_fail_detected(dut):
+    """Fault injection: flip one accumulator bit mid-BIST. The signature must
+    change, BIST_PASS must stay low, and a later clean BIST must pass again."""
+    spi = await setup(dut, half=6)
+    golden, _, _ = bist()
+
+    await spi.write(0x00, [0x04])  # BIST_START
+    # wait for a compute run inside the BIST, let it get going, then corrupt PE11
+    for _ in range(400):
+        await ClockCycles(dut.clk, 1)
+        if int(dut.user_project.u_core.state.value) == 1:  # S_RUN
+            break
+    else:
+        raise AssertionError("BIST never started a compute run")
+    await ClockCycles(dut.clk, 3)
+    dut.user_project.u_core.pe11.acc.value = int(dut.user_project.u_core.pe11.acc.value) ^ 1
+    await wait_bist(dut)
+
+    pins = int(dut.uo_out.value)
+    assert pins & BIST_DONE, "BIST_DONE must still rise on a failing run"
+    assert not pins & BIST_PASS, "BIST_PASS must stay low when the signature is wrong"
+    assert (await spi.read(0x01, 1))[0] == 0x08  # BIST_DONE set, BIST_PASS clear
+    raw = await spi.read(0x32, 2)
+    bad_sig = raw[0] | raw[1] << 8
+    assert bad_sig != golden, "a corrupted run must not give the golden signature"
+    dut._log.info(f"fault injected: signature {bad_sig:#06x} (golden {golden:#06x})")
+
+    # recovery: a clean BIST passes again
+    await spi.write(0x00, [0x08])  # CLR_FLAGS
+    await spi.write(0x00, [0x04])
+    await wait_bist(dut)
+    assert int(dut.uo_out.value) & BIST_PASS
+    assert (await spi.read(0x32, 2)) == [golden & 0xFF, golden >> 8]
+
+
+@cocotb.test()
+async def test_heartbeat(dut):
+    """HEARTBEAT is bit 21 of a free-running counter: low after reset, then rises."""
+    await setup(dut, half=6)
+    HB = 0x40
+    assert not int(dut.uo_out.value) & HB
+    for chunk in range((1 << 21) // (1 << 16) + 2):
+        await ClockCycles(dut.clk, 1 << 16)
+        if int(dut.uo_out.value) & HB:
+            dut._log.info(f"heartbeat high after ~{(chunk + 1) << 16} cycles")
+            return
+    raise AssertionError("HEARTBEAT never rose within 2^21 + margin cycles")

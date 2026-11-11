@@ -45,3 +45,20 @@ Using Surfer
 ```sh
 surfer tb.fst
 ```
+
+## Coverage
+
+`./coverage.sh` re-runs the whole suite under Verilator and prints line, branch,
+expression and toggle coverage (annotated sources land in `cov_annot/`).
+
+Measured with 17 tests: line 98.3 %, branch 100 %, expression 99.3 %, toggle 97.7 %.
+Everything not covered is deliberate or unreachable:
+
+- `uio_in`, `ui_in[7]`, `uo_out[7]`, `ena`: unused or tied off.
+- `cycle_cnt[15:11]`: the longest run (BIST) is 1409 cycles, so they cannot toggle.
+- the `default:` branch of the BIST FSM: unreachable by construction (formal proves it).
+- heartbeat falling edge (needs 2^22 cycles) and three signature bits that are equal in
+  the golden and the fault-injected signature.
+
+`test_bist_fail_detected` injects a fault with `dut.user_project...` (RTL only) and is
+skipped in gate-level runs.
