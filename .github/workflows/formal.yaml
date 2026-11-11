@@ -1,0 +1,27 @@
+name: formal
+on: [push, workflow_dispatch]
+jobs:
+  formal:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v6
+
+      # Same OSS CAD Suite build the proofs were developed with (Yosys, SymbiYosys, bitwuzla, abc)
+      - name: Set up OSS CAD Suite
+        uses: YosysHQ/setup-oss-cad-suite@v4
+        with:
+          version: '2026-11-09'
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run bounded and unbounded proofs
+        run: |
+          cd formal
+          sby -f tinymac.sby bmc prove
+
+      - name: Upload counterexample traces on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: formal-traces
+          path: formal/tinymac_*/

@@ -1,23 +1,19 @@
-![](../../workflows/gds/badge.svg) ![](../../workflows/docs/badge.svg) ![](../../workflows/test/badge.svg) ![](../../workflows/fpga/badge.svg)
+![](../../workflows/gds/badge.svg) ![](../../workflows/docs/badge.svg) ![](../../workflows/test/badge.svg) ![](../../workflows/formal/badge.svg)
 
 # TinyMAC: 2x2 INT8 systolic accelerator
 
-- [Read the documentation for project](docs/info.md)
+A small matrix-multiply accelerator for Tiny Tapeout (GF180MCU, 2x2 tiles, 20 MHz): multiplies a 2x4 INT8 matrix by a 4x2 INT8 matrix over an SPI register interface, with overflow detection, a built-in self-test and a debug bus.
+
+- [Read the documentation for project](docs/info.md): how it works, register map, how to test, bring-up checklist
+- `src/`: Verilog (SPI slave, register file, compute core, PEs, BIST, top level)
+- `test/`: cocotb testbench and NumPy model (`make`), coverage script (`./coverage.sh`)
+- `formal/`: SymbiYosys proofs (`sby -f tinymac.sby`)
 
 ## What is Tiny Tapeout? 
 
 Tiny Tapeout is an educational project that aims to make it easier and cheaper than ever to get your digital and analog designs manufactured on a real chip.
 
 To learn more and get started, visit https://tinytapeout.com.
-
-## Set up your Verilog project
-
-1. Add your Verilog files to the `src` folder.
-2. Edit the [info.yaml](info.yaml) and update information about your project, paying special attention to the `source_files` and `top_module` properties. If you are upgrading an existing Tiny Tapeout project, check out our [online info.yaml migration tool](https://tinytapeout.github.io/tt-yaml-upgrade-tool/).
-3. Edit [docs/info.md](docs/info.md) and add a description of your project.
-4. Adapt the testbench to your design. See [test/README.md](test/README.md) for more information.
-
-The GitHub action will automatically build the ASIC files using [LibreLane](https://www.zerotoasiccourse.com/terminology/librelane/).
 
 ## Enable GitHub actions to build the results page
 
